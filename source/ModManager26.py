@@ -20,27 +20,29 @@ except ImportError:
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QLabel, QPushButton, QLineEdit, 
                              QScrollArea, QFrame, QGraphicsDropShadowEffect, 
-                             QLayout, QToolTip, QStackedWidget, QFileDialog, QMessageBox, QStackedLayout)
+                             QLayout, QToolTip, QStackedWidget, QFileDialog, QMessageBox, QStackedLayout, QRubberBand, QStyleOption, QStyle)
 from PyQt6.QtCore import (Qt, QSize, QPropertyAnimation, QEasingCurve, 
                           pyqtSignal, QRect, QPoint, pyqtProperty)
-from PyQt6.QtGui import QColor, QFont, QPainter, QFontMetrics, QPixmap, QCursor, QIcon
+from PyQt6.QtGui import QColor, QFont, QPainter, QFontMetrics, QPixmap, QCursor, QIcon, QDragEnterEvent, QDropEvent, QPalette
 
 # --- CONFIGURATION ---
 CONFIG_FILE = "mod_config.json"
-APP_ID = u'wartype.hon.modmanager.v0.5.8' # Arbitrary unique ID for Taskbar Grouping
+APP_ID = u'wartype.hon.modmanager.v0.7.1' # Updated Version ID
 
 THEME = {
-    "bg_primary": "#090909",       
-    "bg_secondary": "#141414",     
-    "bg_tertiary": "#202020",      
+    "bg_primary": "#090909",        
+    "bg_secondary": "#141414",      
+    "bg_tertiary": "#202020",       
     "accent": "#ff4d4d",            
     "accent_hover": "#ff6666",
-    "success": "#4dff88",        
+    "success": "#4dff88",         
     "success_hover": "#66ff99",
-    "text_primary": "#ffffff",     
-    "text_secondary": "#9e9e9e",   
-    "border": "#2c2c2c",           
-    "btn_inactive": "#1f1f1f"      
+    "text_primary": "#ffffff",      
+    "text_secondary": "#9e9e9e",    
+    "border": "#2c2c2c",            
+    "btn_inactive": "#1f1f1f",
+    "selection_border": "#00aaff",  
+    "selection_bg": "rgba(0, 170, 255, 0.1)"
 }
 
 INSTALLED_MODS = [] 
@@ -325,6 +327,12 @@ class ToggleSwitch(QWidget):
         self._circle_position = pos
         self.update()
 
+    def set_state_no_signal(self, checked):
+        """Helper to set state without triggering signals"""
+        self.isChecked = checked
+        self._circle_position = 22.0 if checked else 4.0
+        self.update()
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -351,18 +359,28 @@ class ToggleSwitch(QWidget):
 class ModCard(QFrame):
     status_changed = pyqtSignal(str, bool)
     delete_requested = pyqtSignal(str) # Signal for deletion request
+    selection_changed = pyqtSignal(str, bool) # Signal for selection changes
     
     def __init__(self, mod_data):
         super().__init__()
         self.mod_data = mod_data
-        self.setFixedSize(290, 95)
+        
+        # --- COMPACT MODE UPDATE ---
+        self.setFixedSize(290, 50)
+        
+        # Add Tooltip for description (Wrapping logic)
+        desc_text = mod_data.get("description", "No description available.")
+        tooltip_html = f"<p style='white-space:pre-wrap; width:250px;'>{desc_text}</p>"
+        self.setToolTip(tooltip_html)
+
         self.is_delete_mode = False
+        self.is_selected = False
         
         # Define styles
         self.default_style = f"""
             ModCard {{
                 background-color: {THEME['bg_secondary']};
-                border-radius: 8px;
+                border-radius: 6px;
                 border: 1px solid {THEME['bg_tertiary']};
             }}
             ModCard:hover {{
@@ -374,16 +392,24 @@ class ModCard(QFrame):
         self.delete_style = f"""
             ModCard {{
                 background-color: {THEME['accent']};
-                border-radius: 8px;
+                border-radius: 6px;
                 border: 1px solid {THEME['accent']};
+            }}
+        """
+
+        self.selected_style = f"""
+            ModCard {{
+                background-color: {THEME['selection_bg']};
+                border-radius: 6px;
+                border: 2px solid {THEME['selection_border']};
             }}
         """
         
         self.setStyleSheet(self.default_style)
 
         shadow = QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(15)
-        shadow.setYOffset(4)
+        shadow.setBlurRadius(10)
+        shadow.setYOffset(2)
         shadow.setColor(QColor(0, 0, 0, 80))
         self.setGraphicsEffect(shadow)
         
@@ -391,15 +417,15 @@ class ModCard(QFrame):
         self.stack_layout = QStackedLayout(self)
         self.stack_layout.setContentsMargins(0, 0, 0, 0)
 
-        # --- VIEW 1: Normal Content ---
+        # --- VIEW 1: Normal Content (COMPACT) ---
         self.normal_view = QWidget()
         layout = QHBoxLayout(self.normal_view)
-        layout.setContentsMargins(10, 5, 10, 5)
-        layout.setSpacing(12)
+        layout.setContentsMargins(8, 2, 8, 2)
+        layout.setSpacing(10)
 
-        # Icon
+        # Icon - Resized for 50px height
         self.icon_lbl = QLabel()
-        self.icon_lbl.setFixedSize(60, 60)
+        self.icon_lbl.setFixedSize(36, 36)
         
         has_image = False
         if "icon_data" in mod_data and mod_data["icon_data"]:
@@ -407,54 +433,37 @@ class ModCard(QFrame):
             if pixmap.loadFromData(mod_data["icon_data"]):
                 self.icon_lbl.setPixmap(pixmap)
                 self.icon_lbl.setScaledContents(True)
-                self.icon_lbl.setStyleSheet(f"border-radius: 8px; border: 1px solid {THEME['border']};")
+                self.icon_lbl.setStyleSheet(f"border-radius: 4px; border: 1px solid {THEME['border']};")
                 has_image = True
         
         if not has_image:
             self.icon_lbl.setText(mod_data["name"][:2].upper())
             self.icon_lbl.setStyleSheet(f"""
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {THEME['bg_tertiary']}, stop:1 {THEME['bg_primary']});
-                border-radius: 8px;
+                border-radius: 4px;
                 color: {THEME['text_primary']};
-                font-size: 20px; font-weight: bold; border: 1px solid {THEME['border']};
+                font-size: 14px; font-weight: bold; border: 1px solid {THEME['border']};
             """)
         
         self.icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.icon_lbl)
 
-        # Text Area
+        # Text Area (Compact)
         text_layout = QVBoxLayout()
         text_layout.setSpacing(0)
-        text_layout.setContentsMargins(0, 0, 0, 0)
+        text_layout.setContentsMargins(0, 4, 0, 4)
         
         self.title = QLabel(mod_data["name"])
-        self.title.setStyleSheet(f"font-size: 14px; font-weight: bold; color: {THEME['text_primary']}; background: transparent; border: none;")
+        self.title.setStyleSheet(f"font-size: 13px; font-weight: bold; color: {THEME['text_primary']}; background: transparent; border: none;")
         
         self.meta = QLabel(f"v{mod_data['version']} • {mod_data['author']}")
-        self.meta.setStyleSheet(f"font-size: 11px; font-weight: 600; color: {THEME['accent']}; background: transparent; border: none;")
+        self.meta.setStyleSheet(f"font-size: 10px; font-weight: 600; color: {THEME['accent']}; background: transparent; border: none;")
         
-        self.desc = QLabel()
-        self.desc.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        self.desc.setStyleSheet(f"font-size: 11px; color: {THEME['text_secondary']}; background: transparent; border: none;")
-        
-        available_width = 136 
-        full_text = mod_data.get("description", "")
-        max_lines = 3
-        
-        metrics = QFontMetrics(self.desc.font())
-        elided_text = self.elide_multiline_text(metrics, full_text, available_width, max_lines)
-        
-        self.desc.setText(elided_text)
-        if elided_text != full_text:
-            self.desc.setToolTip(full_text)
-
         text_layout.addWidget(self.title)
         text_layout.addWidget(self.meta)
-        text_layout.addWidget(self.desc)
-        text_layout.addStretch() 
         layout.addLayout(text_layout)
 
-        # Toggle 
+        # Toggle (Scale down slightly if needed, but standard 26px fits in 50px)
         self.toggle = ToggleSwitch(checked=mod_data["enabled"])
         self.toggle.toggled.connect(self.on_toggle)
         layout.addWidget(self.toggle, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -466,10 +475,10 @@ class ModCard(QFrame):
         del_layout.setContentsMargins(0,0,0,0)
         del_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
-        # Trash Icon + Question Mark
-        del_label = QLabel("🗑 ?") 
+        # Trash Icon + Question Mark (Compact)
+        del_label = QLabel("🗑") 
         del_label.setStyleSheet(f"""
-            font-size: 40px; 
+            font-size: 20px; 
             font-weight: bold; 
             color: #ffffff;
             background: transparent;
@@ -477,17 +486,14 @@ class ModCard(QFrame):
         """)
         del_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
-        del_sub = QLabel("Click to Delete")
+        del_sub = QLabel("Delete?")
         del_sub.setStyleSheet("font-size: 12px; color: white; font-weight: bold; border: none;")
         del_sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        v_del = QVBoxLayout()
-        v_del.addStretch()
-        v_del.addWidget(del_label, 0, Qt.AlignmentFlag.AlignCenter)
-        v_del.addWidget(del_sub, 0, Qt.AlignmentFlag.AlignCenter)
-        v_del.addStretch()
-        
-        del_layout.addLayout(v_del)
+        # Horizontal layout for compact delete
+        del_layout.addWidget(del_label)
+        del_layout.addSpacing(10)
+        del_layout.addWidget(del_sub)
 
         # Add views to stack
         self.stack_layout.addWidget(self.normal_view)
@@ -501,18 +507,19 @@ class ModCard(QFrame):
             else:
                 self.enter_delete_mode()
         elif event.button() == Qt.MouseButton.LeftButton:
-            # If in delete mode, confirm deletion
             if self.is_delete_mode:
                 self.delete_requested.emit(self.mod_data["id"])
             else:
-                # Pass through if not deleting
+                # --- CHANGE: REMOVED SINGLE CLICK SELECTION ---
+                # We ignore standard click for selection as requested.
+                # Only dragged selection works (handled by parent).
                 super().mousePressEvent(event)
     
     def enterEvent(self, event):
         super().enterEvent(event)
         
     def leaveEvent(self, event):
-        # Reset if mouse leaves the card
+        # Reset if mouse leaves the card (only for delete mode)
         if self.is_delete_mode:
             self.reset_to_normal()
         super().leaveEvent(event)
@@ -524,32 +531,84 @@ class ModCard(QFrame):
 
     def reset_to_normal(self):
         self.is_delete_mode = False
-        self.setStyleSheet(self.default_style)
+        if self.is_selected:
+            self.setStyleSheet(self.selected_style)
+        else:
+            self.setStyleSheet(self.default_style)
         self.stack_layout.setCurrentIndex(0)
 
-    def elide_multiline_text(self, metrics, text, width, max_lines):
-        if metrics.horizontalAdvance(text) <= width:
-            return text
-        lines = []
-        words = text.split(' ')
-        current_line = []
-        for word in words:
-            test_line = ' '.join(current_line + [word])
-            if metrics.horizontalAdvance(test_line) <= width:
-                current_line.append(word)
-            else:
-                if current_line: lines.append(' '.join(current_line))
-                current_line = [word]
-        if current_line: lines.append(' '.join(current_line))
-        if len(lines) <= max_lines: return "\n".join(lines)
-        visible_lines = lines[:max_lines-1]
-        remaining_text = " ".join(lines[max_lines-1:]) + " " + " ".join(lines[max_lines:])
-        last_line = metrics.elidedText(remaining_text, Qt.TextElideMode.ElideRight, width)
-        return "\n".join(visible_lines + [last_line])
+    def set_selected(self, selected):
+        self.is_selected = selected
+        if self.is_delete_mode: return # Don't override delete style
+        
+        if self.is_selected:
+            self.setStyleSheet(self.selected_style)
+        else:
+            self.setStyleSheet(self.default_style)
+        self.selection_changed.emit(self.mod_data["id"], self.is_selected)
 
     def on_toggle(self, checked):
         self.mod_data["enabled"] = checked
         self.status_changed.emit(self.mod_data["id"], checked)
+    
+    def set_toggle_silent(self, checked):
+        """Sets toggle state without emitting signals (used for Enable All)"""
+        self.toggle.blockSignals(True)
+        self.toggle.set_state_no_signal(checked)
+        self.toggle.blockSignals(False)
+        self.mod_data["enabled"] = checked
+
+# --- NEW: Selectable Container for Rubber Band ---
+class SelectableContainer(QWidget):
+    selection_made = pyqtSignal(list) # Emits list of mod IDs selected
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.rubberBand = QRubberBand(QRubberBand.Shape.Rectangle, self)
+        self.origin = QPoint()
+        self.setObjectName("mod_container") # Keep styling
+        # FIX: Ensure background stylesheet is respected by this custom widget
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.origin = event.pos()
+            self.rubberBand.setGeometry(QRect(self.origin, QSize()))
+            self.rubberBand.show()
+            
+            # --- FIX: CLEAR PREVIOUS SELECTION IF NO CTRL ---
+            modifiers = QApplication.keyboardModifiers()
+            if modifiers != Qt.KeyboardModifier.ControlModifier:
+                # Clear all existing selections immediately
+                layout = self.layout()
+                if layout:
+                    for i in range(layout.count()):
+                        item = layout.itemAt(i)
+                        if item and item.widget():
+                            item.widget().set_selected(False)
+
+    def mouseMoveEvent(self, event):
+        if not self.origin.isNull():
+            self.rubberBand.setGeometry(QRect(self.origin, event.pos()).normalized())
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.rubberBand.hide()
+            rect = self.rubberBand.geometry()
+            
+            # Perform selection if rect is valid
+            if rect.width() > 2 or rect.height() > 2:
+                layout = self.layout()
+                if layout:
+                    for i in range(layout.count()):
+                        item = layout.itemAt(i)
+                        if item and item.widget():
+                            widget = item.widget()
+                            # Map widget geometry to container coordinates
+                            if widget.geometry().intersects(rect):
+                                widget.set_selected(True)
+            
+            self.origin = QPoint() # Reset
 
 class DashboardPage(QWidget):
     def __init__(self, mods_data):
@@ -584,14 +643,14 @@ class DashboardPage(QWidget):
 
         # Updated Changelog entries (8 slots)
         all_updates = [
-             ("v0.5.8", "UI Updates: 'Browse Online' placeholder and fixed monochrome icons."),
-             ("v0.5.7", "Added 'Dev Mode' toggle to Settings (Controls console logs)."),
-             ("v0.5.6", "Added 'Right-Click' delete mode to mod cards."),
-             ("v0.5.5", "Implemented robust stateful XML parser (Fixes OptLib)."),
-             ("v0.5.4", "Added custom logo support from /data/ folder."),
-             ("v0.5.3", "Added 'Launch HoN' button with persistency."),
-             ("v0.5.2", "Added support for asset injection mods."),
-             ("v0.5.1", "Fixed .jz extraction (Zstd support)."),
+             ("v0.7.1", "Bug Fix: Fixed selection issues and background color."),
+             ("v0.7.0", "New Feature: Multi-select mods (Drag box / Ctrl+Click)."),
+             ("v0.6.3", "UI Polish: 'Enable All' toggle hidden on Dashboard."),
+             ("v0.6.2", "Bug Fix: 'Enable All' toggle logic fixed."),
+             ("v0.6.1", "Feature: Added 'Enable/Disable All' toggle."),
+             ("v0.6.0", "UI Polish: Fixed spacing in My Mods controls."),
+             ("v0.5.9", "UI Update: Compact 'List View' for mods."),
+             ("v0.5.8", "Added Drag & Drop support for .honmod files."),
         ]
         
         display_updates = all_updates[:8]
@@ -907,8 +966,9 @@ class HoNModManager(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("HoN Mod Manager")
-        self.resize(936, 620)
+        self.resize(950, 630)
         self.is_ready_to_launch = False 
+        self.selected_mods_count = 0 # Track selection count
         
         # Save original stdout for restoring later
         self.original_stdout = sys.stdout
@@ -960,6 +1020,9 @@ class HoNModManager(QMainWindow):
         self.main_layout = QHBoxLayout(self.central_widget)
         self.main_layout.setContentsMargins(0, 0, 0, 0)
         self.main_layout.setSpacing(0)
+        
+        # ENABLE DRAG AND DROP
+        self.setAcceptDrops(True)
 
         self.setup_ui()
         self.apply_styles()
@@ -1092,6 +1155,57 @@ class HoNModManager(QMainWindow):
         for file_path in files:
             mod_data = self.parse_mod_file(file_path)
             if mod_data: INSTALLED_MODS.append(mod_data)
+    
+    # --- DRAG AND DROP EVENTS ---
+    def dragEnterEvent(self, event: QDragEnterEvent):
+        # Allow drop ONLY if dragged items contain files that end in .honmod
+        if event.mimeData().hasUrls():
+            urls = event.mimeData().urls()
+            # Check strictly: if ANY file is NOT .honmod, we could reject, 
+            # or just accept and filter later. 
+            # Request says: "rejected unless theyre .honmod". 
+            # I will reject the drag if there are NO .honmod files.
+            has_honmod = False
+            for url in urls:
+                if url.toLocalFile().lower().endswith(".honmod"):
+                    has_honmod = True
+                    break
+            
+            if has_honmod:
+                event.accept()
+            else:
+                event.ignore()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event: QDropEvent):
+        files = [u.toLocalFile() for u in event.mimeData().urls()]
+        honmod_files = [f for f in files if f.lower().endswith(".honmod")]
+        
+        if honmod_files:
+            self.import_dropped_mods(honmod_files)
+        
+    def import_dropped_mods(self, file_paths):
+        if not self.mods_dir: 
+            return
+        
+        count = 0
+        for src_path in file_paths:
+            try:
+                src = Path(src_path)
+                dst = self.mods_dir / src.name
+                shutil.copy2(src, dst)
+                count += 1
+                print(f"Dropped mod imported: {src.name}")
+            except Exception as e:
+                print(f"Error importing dropped file {src_path}: {e}")
+        
+        if count > 0:
+            self.refresh_mods_library()
+            self.populate_mods()
+            self.dashboard_page.refresh_stats()
+            # Switch to My Mods tab so user sees the new mod
+            self.nav_btns[1].click()
 
     def import_mods(self):
         if not self.mods_dir: return
@@ -1187,12 +1301,18 @@ class HoNModManager(QMainWindow):
             item = self.mod_layout.takeAt(0)
             if item.widget(): item.widget().deleteLater()
         self.mod_cards.clear()
+        self.selected_mods_count = 0 # Reset selection
+        
         for mod in INSTALLED_MODS:
             card = ModCard(mod)
             card.status_changed.connect(self.handle_toggle)
             card.delete_requested.connect(self.delete_mod)
+            card.selection_changed.connect(self.handle_selection)
             self.mod_layout.addWidget(card)
             self.mod_cards.append(card)
+        
+        # Reset header actions state
+        self.update_header_ui_context()
 
     def setup_ui(self):
         self.sidebar = QFrame()
@@ -1234,7 +1354,7 @@ class HoNModManager(QMainWindow):
         self.sidebar_layout.addStretch()
         
         # --- FOOTER UPDATE ---
-        footer_label = QLabel("HoN Mod Manager v0.5.8\nBy Wartype")
+        footer_label = QLabel("HoN Mod Manager v0.7.1\nBy Wartype")
         footer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         footer_label.setStyleSheet(f"color: {THEME['text_secondary']}; font-size: 11px; border: none;")
         self.sidebar_layout.addWidget(footer_label)
@@ -1246,12 +1366,56 @@ class HoNModManager(QMainWindow):
         header_layout = QHBoxLayout()
         self.page_title = QLabel("Dashboard")
         self.page_title.setStyleSheet(f"font-size: 32px; font-weight: 800; color: {THEME['text_primary']}; border: none;")
-        display_path = str(self.game_root) if self.game_root else "Game Not Found"
-        self.path_label = QLabel(display_path)
-        self.path_label.setStyleSheet(f"color: {THEME['text_secondary']}; font-family: Consolas; border: none;")
+        
+        # --- NEW HEADER LOGIC ---
+        # Replaced the path_label with an Enable/Disable All Switch
+        self.header_actions = QWidget()
+        self.ha_layout = QHBoxLayout(self.header_actions)
+        self.ha_layout.setContentsMargins(0, 0, 0, 0)
+        self.ha_layout.setSpacing(10)
+
+        # Delete Selected Button (Hidden by default)
+        self.del_selected_btn = QPushButton("🗑")
+        self.del_selected_btn.setFixedSize(30, 26)
+        self.del_selected_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.del_selected_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {THEME['bg_tertiary']};
+                color: {THEME['accent']};
+                border: 1px solid {THEME['accent']};
+                border-radius: 4px;
+                font-size: 14px;
+            }}
+            QPushButton:hover {{
+                background-color: {THEME['accent']};
+                color: #ffffff;
+            }}
+        """)
+        self.del_selected_btn.clicked.connect(self.delete_selected_mods)
+        self.del_selected_btn.hide()
+
+        self.ha_label = QLabel("Enable All")
+        self.ha_label.setStyleSheet(f"color: {THEME['text_secondary']}; font-weight: bold; font-size: 14px;")
+        
+        # Create a toggle for "All Mods"
+        # We determine initial state by checking if ALL mods are enabled (not just any)
+        # Fix: Default to False if list is empty to prevent weird UI state
+        all_enabled = all(m['enabled'] for m in INSTALLED_MODS) if INSTALLED_MODS else False
+        self.all_mods_toggle = ToggleSwitch(checked=all_enabled)
+        self.all_mods_toggle.toggled.connect(self.toggle_batch_mods)
+        
+        self.ha_layout.addWidget(self.del_selected_btn)
+        self.ha_layout.addWidget(self.ha_label)
+        self.ha_layout.addWidget(self.all_mods_toggle)
+        
         header_layout.addWidget(self.page_title)
         header_layout.addStretch()
-        header_layout.addWidget(self.path_label)
+        header_layout.addWidget(self.header_actions)
+        
+        # Default start page is Dashboard (Index 0)
+        self.header_actions.setVisible(False)
+        # ------------------------
+
         self.content_layout.addLayout(header_layout)
         self.content_layout.addSpacing(20)
         self.stack = QStackedWidget()
@@ -1266,6 +1430,7 @@ class HoNModManager(QMainWindow):
         mods_layout = QVBoxLayout(self.mods_page)
         mods_layout.setContentsMargins(0, 0, 0, 0)
         controls_layout = QHBoxLayout()
+        controls_layout.setSpacing(10) # CHANGED: Set consistent spacing for the layout
         self.search_bar = QLineEdit()
         self.search_bar.setPlaceholderText("Search installed mods...")
         self.search_bar.setFixedHeight(40)
@@ -1278,7 +1443,7 @@ class HoNModManager(QMainWindow):
         self.apply_btn.clicked.connect(self.on_main_button_click)
         controls_layout.addWidget(self.search_bar, 1)
         controls_layout.addWidget(self.import_btn)
-        controls_layout.addSpacing(10)
+        # CHANGED: Removed manual addSpacing(10) to use setSpacing(10) instead
         controls_layout.addWidget(self.apply_btn)
         mods_layout.addLayout(controls_layout)
         mods_layout.addSpacing(20)
@@ -1286,8 +1451,10 @@ class HoNModManager(QMainWindow):
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.mod_container = QWidget()
-        self.mod_container.setObjectName("mod_container")
+        
+        # Use Custom Container for Rubber Band
+        self.mod_container = SelectableContainer()
+        
         self.mod_layout = FlowLayout(self.mod_container, margin=0, h_spacing=15, v_spacing=15)
         self.mod_cards = []
         self.populate_mods()
@@ -1312,6 +1479,111 @@ class HoNModManager(QMainWindow):
         self.nav_btns[0].setChecked(True)
         self.stack.setCurrentIndex(0)
 
+    # --- SELECTION & BATCH LOGIC ---
+    def handle_selection(self, mod_id, is_selected):
+        # Update selection count WITHOUT clearing other selections (Moved logic to container)
+        self.selected_mods_count = sum(1 for c in self.mod_cards if c.is_selected)
+        self.update_header_ui_context()
+
+    def update_header_ui_context(self):
+        """Updates header text and buttons based on selection state"""
+        if self.selected_mods_count > 0:
+            self.ha_label.setText(f"Enable Selected ({self.selected_mods_count})")
+            self.del_selected_btn.show()
+            
+            # Set toggle state based on selected items
+            # If ALL selected items are enabled, toggle ON. Else OFF.
+            selected_cards = [c for c in self.mod_cards if c.is_selected]
+            all_selected_enabled = all(c.mod_data['enabled'] for c in selected_cards)
+            
+            self.all_mods_toggle.blockSignals(True)
+            self.all_mods_toggle.set_state_no_signal(all_selected_enabled)
+            self.all_mods_toggle.blockSignals(False)
+            
+        else:
+            self.ha_label.setText("Enable All")
+            self.del_selected_btn.hide()
+            
+            # Default "Enable All" state logic
+            if not INSTALLED_MODS:
+                 all_enabled = False
+            else:
+                 all_enabled = all(m['enabled'] for m in INSTALLED_MODS)
+            
+            self.all_mods_toggle.blockSignals(True)
+            self.all_mods_toggle.set_state_no_signal(all_enabled)
+            self.all_mods_toggle.blockSignals(False)
+
+    def toggle_batch_mods(self, checked):
+        """Handles the main header toggle click"""
+        if self.selected_mods_count > 0:
+            # Action: Toggle ONLY selected mods
+            for card in self.mod_cards:
+                if card.is_selected:
+                    card.set_toggle_silent(checked)
+                    # Update internal data reference
+                    # (ModCard.set_toggle_silent handles UI, we need to ensure data flows)
+        else:
+            # Action: Toggle ALL mods
+            for mod in INSTALLED_MODS:
+                mod['enabled'] = checked
+            for card in self.mod_cards:
+                card.set_toggle_silent(checked)
+            
+        # Update application state
+        self.is_ready_to_launch = False
+        self.update_action_button()
+        self.dashboard_page.refresh_stats()
+        self.save_config()
+
+    def delete_selected_mods(self):
+        selected_ids = [c.mod_data["id"] for c in self.mod_cards if c.is_selected]
+        if not selected_ids: return
+        
+        reply = QMessageBox.question(self, "Delete Mods", 
+                                     f"Are you sure you want to delete {len(selected_ids)} selected mods?",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            # Iterate backwards or copy list to avoid mutation issues
+            for mod_id in selected_ids:
+                # Reuse existing delete logic (we'll suppress refresh/save until end)
+                self.delete_mod_internal(mod_id, save_and_refresh=False)
+            
+            # Finalize
+            self.save_config()
+            self.populate_mods()
+            self.dashboard_page.refresh_stats()
+            self.is_ready_to_launch = False
+            self.update_action_button()
+
+    def delete_mod_internal(self, mod_id, save_and_refresh=True):
+        """Helper to delete without refreshing UI every time (for batch operations)"""
+        mod_to_delete = next((m for m in INSTALLED_MODS if m['id'] == mod_id), None)
+        if not mod_to_delete: return
+        
+        file_path = Path(mod_to_delete['file_path'])
+        try:
+            if file_path.exists():
+                os.remove(file_path)
+            
+            INSTALLED_MODS.remove(mod_to_delete)
+            
+            if mod_id in self.saved_enabled_mods:
+                self.saved_enabled_mods.remove(mod_id)
+            
+            if save_and_refresh:
+                self.save_config()
+                self.populate_mods()
+                self.dashboard_page.refresh_stats()
+                self.is_ready_to_launch = False
+                self.update_action_button()
+                
+        except Exception as e:
+            print(f"Error deleting {mod_id}: {e}")
+
+    # --- END SELECTION LOGIC ---
+
     def filter_mods(self, text):
         text = text.lower()
         for card in self.mod_cards:
@@ -1327,11 +1599,18 @@ class HoNModManager(QMainWindow):
         elif page_name == "Browse Online": self.stack.setCurrentIndex(2)
         elif page_name == "Settings": self.stack.setCurrentIndex(3)
         
+        # CHANGED: Logic to show/hide "Enable All" button
+        if page_name == "My Mods":
+            self.header_actions.setVisible(True)
+        else:
+            self.header_actions.setVisible(False)
+        
     def handle_toggle(self, mod_id, status):
         self.is_ready_to_launch = False
         self.update_action_button()
         self.dashboard_page.refresh_stats()
-        # Save mod status to config
+        
+        self.update_header_ui_context()
         self.save_config()
 
     def apply_styles(self):
@@ -1345,8 +1624,15 @@ class HoNModManager(QMainWindow):
             QLineEdit {{ background-color: {THEME['bg_tertiary']}; color: {THEME['text_primary']}; border: 1px solid {THEME['border']}; border-radius: 6px; padding: 5px 15px; font-size: 14px; }}
             QLineEdit:focus {{ border: 1px solid {THEME['accent']}; }}
             QScrollBar:vertical {{ border: none; background: {THEME['bg_primary']}; width: 8px; }}
-            QScrollBar::handle:vertical {{ background: {THEME['border']}; border-radius: 4px; }}
+            QScrollBar::handle:vertical {{ background: {THEME['accent']}; border-radius: 4px; }}
+            QScrollBar::handle:vertical:hover {{ background: {THEME['accent_hover']}; }}
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}
+            
+            /* RubberBand Style */
+            QRubberBand {{
+                border: 2px solid {THEME['selection_border']};
+                background-color: {THEME['selection_bg']};
+            }}
         """)
         self.sidebar.setObjectName("sidebar")
 
